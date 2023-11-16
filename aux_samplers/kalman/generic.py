@@ -61,10 +61,10 @@ def _get_kernel(dynamics_factory,
         u = x + sqrt_half_delta * jax.random.normal(auxiliary_key, x.shape)
 
         # Propose new state
-        log_lgssm_prop, log_target_prop, x_prop = do_one(delta, sampling_key, u, x)
+        log_lgssm_prop, log_target_prop, x_prop, ms, Ps = do_one(delta, sampling_key, u, x)
 
         # Form the reverse proposal LGSSM
-        log_lgssm_rev, log_target_rev, _ = do_one(delta, sampling_key, u, x_prop, x)
+        log_lgssm_rev, log_target_rev, _, _, _ = do_one(delta, sampling_key, u, x_prop, x)
 
         # Acceptance ratio for pi(x | u)
         alpha = _get_alpha(log_lgssm_prop, log_lgssm_rev, log_target_prop, log_target_rev, sqrt_delta, u, x, x_prop)
@@ -83,11 +83,11 @@ def _get_kernel(dynamics_factory,
         lgssm = LGSSM(m0, P0, Fs, Qs, bs, Hs, Rs, cs)
         ms, Ps, ell = filtering(ys, lgssm, parallel)
         if x_prop is None:
-            x_prop = sampling(sampling_key, ms, Ps, lgssm, parallel)
+            ms, Ps, x_prop = sampling(sampling_key, ms, Ps, lgssm, parallel)
         # Proposal logpdf
         log_lgssm_prop = posterior_logpdf(ys, x_prop, ell, lgssm)
         log_target_prop = log_likelihood_fn(x_prop)
-        return log_lgssm_prop, log_target_prop, x_prop
+        return log_lgssm_prop, log_target_prop, x_prop, ms, Ps
 
     def init(x):
         return KalmanSampler(x=x, updated=True)

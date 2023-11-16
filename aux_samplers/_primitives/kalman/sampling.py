@@ -26,38 +26,51 @@ def sampling(key: PRNGKey, ms: Array, Ps: Array, lgssm: LGSSM, parallel: bool) -
         Whether to run the sampling in _parallel.
     """
     Fs, Qs, bs = lgssm.Fs, lgssm.Qs, lgssm.bs
-    gains, increments = _sampling_init(key, ms, Ps, Fs, Qs, bs)  # noqa: bad static type checking
+    mean_incs, cov_incs, gains, sample_incs = \
+        _sampling_init(key, ms, Ps, Fs, Qs, bs)  # noqa: bad static type checking
     if parallel:
-        _, samples = jax.lax.associative_scan(jax.vmap(_sampling_op),
-                                              (gains, increments), reverse=True)
+        _, (means, covs, _, samples) = jax.lax.associative_scan(
+            jax.vmap(_sampling_op),
+            (mean_incs, cov_incs, gains, sample_incs),
+            reverse=True
+        )
     else:
         def body(carry, inputs):
             carry = _sampling_op(carry, inputs)
             return carry, carry
 
-        _, (_, samples) = jax.lax.scan(body, (gains[-1], increments[-1]), (gains[:-1], increments[:-1]), reverse=True)
-        samples = jnp.append(samples, increments[None, -1, ...], 0)
-    return samples
+        _, (means, covs, _, samples) = jax.lax.scan(
+            body,
+            (mean_incs[-1], cov_incs[-1], gains[-1], sample_incs[-1]),
+            (mean_incs[:-1], cov_incs[:-1], gains[:-1], sample_incs[:-1]),
+            reverse=True
+        )
+
+        means = jnp.append(means, mean_incs[None, -1, ...], 0)
+        covs = jnp.append(covs, cov_incs[None, -1, ...], 0)
+        samples = jnp.append(samples, sample_incs[None, -1, ...], 0)
+    return means, covs, samples
 
 
 # Operator
 def _sampling_op(elem1, elem2):
-    G1, e1 = elem1
-    G2, e2 = elem2
+    m1, P1, G1, e1 = elem1
+    m2, P2, G2, e2 = elem2
+    return _sampling_op_impl(m1, P1, G1, e1, m2, P2, G2, e2)
 
-    return _sampling_op_impl(G1, e1, G2, e2)
 
-
-@partial(jnp.vectorize, signature='(dx,dx),(dx),(dx,dx),(dx)->(dx,dx),(dx)')
-def _sampling_op_impl(G1, e1, G2, e2):
+@partial(jnp.vectorize, signature='(dx),(dx,dx),(dx,dx),(dx),(dx),(dx,dx),(dx,dx),(dx)->(dx),(dx,dx),(dx,dx),(dx)')
+def _sampling_op_impl(m1, P1, G1, e1, m2, P2, G2, e2):
+    m = G2 @ m1 + m2
+    P = G2 @ P1 @ G2.T + P2
     G = G2 @ G1
     e = G2 @ e1 + e2
-    return G, e
+    return m, P, G, e
 
 
 # Initialization
 
-@partial(jnp.vectorize, signature="(dx,dx),(dx,dx),(dx),(dx),(dx,dx)->(dx),(dx,dx),(dx,dx)")
+@partial(jnp.vectorize, signature="(dx,dx),(dx,dx),(dx),(dx),(dx,dx)->(dx),(dx,dx),(dx,dx),(dx,dx)")
 def mean_and_chol(F, Q, b, m, P):
     """
     Computes the increments means and Cholesky decompositions for the backward sampling steps.
@@ -96,23 +109,25 @@ def mean_and_chol(F, Q, b, m, P):
     inc_Sig = 0.5 * (inc_Sig + inc_Sig.T)
 
     inc_m = m - gain @ (F @ m + b)
+    inc_P = P - gain @ F @ P
+
     if dim == 1:
         L = jnp.sqrt(inc_Sig)
     else:
         L = jnp.linalg.cholesky(inc_Sig)
     # When there is 0 uncertainty, the Cholesky decomposition is not defined.
     L = jnp.nan_to_num(L)
-    return inc_m, L, gain
+    return inc_m, inc_P, gain, L
 
 
-@partial(jnp.vectorize, signature="(dx,dx),(dx,dx),(dx),(dx),(dx,dx),(dx)->(dx,dx),(dx)")
+@partial(jnp.vectorize, signature="(dx,dx),(dx,dx),(dx),(dx),(dx,dx),(dx)->(dx),(dx,dx),(dx,dx),(dx)")
 def _sampling_init_one(F, Q, b, m, P, eps):
-    inc_m, L, gain = mean_and_chol(F, Q, b, m, P)
-    inc = inc_m + L @ eps
-    return gain, inc
+    inc_m, inc_P, gain, L = mean_and_chol(F, Q, b, m, P)
+    inc_sample = inc_m + L @ eps
+    return inc_m, inc_P, gain, inc_sample
 
 
-@partial(jnp.vectorize, signature="(dx),(dx,dx),(dx)->(dx,dx),(dx)")
+@partial(jnp.vectorize, signature="(dx),(dx,dx),(dx)->(dx),(dx,dx),(dx,dx),(dx)")
 def _sample_last_step(m, P, eps):
     if P.shape[0] == 1:
         L = jnp.sqrt(P)
@@ -121,16 +136,21 @@ def _sample_last_step(m, P, eps):
     L = jnp.nan_to_num(L)
     last_sample = m + L @ eps
     gain = jnp.zeros_like(P)
-    return gain, last_sample
+    return m, P, gain, last_sample
 
 
 def _sampling_init(key, ms, Ps, Fs, Qs, bs):
     epsilons = jax.random.normal(key, shape=ms.shape)
 
-    gains, increments = jax.vmap(_sampling_init_one)(Fs, Qs, bs, ms[:-1], Ps[:-1], epsilons[:-1])
+    mean_incs, cov_incs, gains, sample_incs = \
+        jax.vmap(_sampling_init_one)(Fs, Qs, bs, ms[:-1], Ps[:-1], epsilons[:-1])
 
     # When we condition on the last step this is 0 and Cholesky ain't liking this.
-    last_gain, last_increment = _sample_last_step(ms[-1], Ps[-1], epsilons[-1])
+    last_mean_inc, last_cov_inc, last_gain, last_sample_inc = \
+        _sample_last_step(ms[-1], Ps[-1], epsilons[-1])
+
+    mean_incs = jnp.append(mean_incs, last_mean_inc[None, ...], 0)
+    cov_incs = jnp.append(cov_incs, last_cov_inc[None, ...], 0)
     gains = jnp.append(gains, last_gain[None, ...], 0)
-    increments = jnp.append(increments, last_increment[None, ...], 0)
-    return gains, increments
+    sample_incs = jnp.append(sample_incs, last_sample_inc[None, ...], 0)
+    return mean_incs, cov_incs, gains, sample_incs
