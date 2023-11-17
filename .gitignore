@@ -130,3 +130,6 @@ dmypy.json
 
 # Saved archives
 *.npz
+
+# IDE files
+.idea/

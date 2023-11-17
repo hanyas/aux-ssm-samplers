@@ -44,6 +44,42 @@ def extended(mean: Callable, cov: Callable, params: Optional[ArrayTree], x_star:
     return F, Q, b
 
 
+def extended_non_additive(fn: Callable, params: Optional[ArrayTree], x_star: Array, _P_star: Optional[Array]):
+    """
+    First order extended linearization for models with non-additive noise.
+
+    Parameters
+    ----------
+    fn: Callable
+        Conditional mean E[X | x*], signature (x, noise, params) -> x
+    params: ArrayTree, optional
+        Parameters of the conditional mean and covariance functions, can be None
+    x_star: Array
+        The point at which the linearisation is performed
+    _P_star: Array, optional
+        This is not used at the moment and is only there for compatibility of the API.
+        Ideally, we could implement a second order linearisation.
+
+    Returns
+    -------
+
+    """
+
+    zero_noise = jnp.zeros_like(x_star)
+    b = fn(x_star, zero_noise, params)
+
+    d_x = x_star.shape[0]
+    d_y = b.shape[0]
+    if d_y < d_x:
+        F_x, F_q = jax.jacrev(fn, (0, 1))(x_star, zero_noise, params)
+    else:
+        F_x, F_q = jax.jacfwd(fn, (0, 1))(x_star, zero_noise, params)
+
+    Q = F_q @ F_q.T
+    b = b - F_x @ x_star
+    return F_x, Q, b
+
+
 def gauss_hermite(mean: Callable, cov: Callable, params: Optional[ArrayTree], x_star: Array, P_star: Array, order=3):
     """
         Cubature method for linearisation.
