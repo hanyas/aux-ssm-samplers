@@ -29,7 +29,7 @@ def sampling(key: PRNGKey, ms: Array, Ps: Array, lgssm: LGSSM, parallel: bool) -
     mean_incs, cov_incs, gains, sample_incs = \
         _sampling_init(key, ms, Ps, Fs, Qs, bs)  # noqa: bad static type checking
     if parallel:
-        _, (means, covs, _, samples) = jax.lax.associative_scan(
+        means, covs, _, samples = jax.lax.associative_scan(
             jax.vmap(_sampling_op),
             (mean_incs, cov_incs, gains, sample_incs),
             reverse=True
@@ -105,11 +105,9 @@ def mean_and_chol(F, Q, b, m, P):
     else:
         gain = P @ solve(S, F, assume_a="pos").T
 
+    inc_m = m - gain @ (F @ m + b)
     inc_Sig = P - gain @ S @ gain.T
     inc_Sig = 0.5 * (inc_Sig + inc_Sig.T)
-
-    inc_m = m - gain @ (F @ m + b)
-    inc_P = P - gain @ F @ P
 
     if dim == 1:
         L = jnp.sqrt(inc_Sig)
@@ -117,7 +115,7 @@ def mean_and_chol(F, Q, b, m, P):
         L = jnp.linalg.cholesky(inc_Sig)
     # When there is 0 uncertainty, the Cholesky decomposition is not defined.
     L = jnp.nan_to_num(L)
-    return inc_m, inc_P, gain, L
+    return inc_m, inc_Sig, gain, L
 
 
 @partial(jnp.vectorize, signature="(dx,dx),(dx,dx),(dx),(dx),(dx,dx),(dx)->(dx),(dx,dx),(dx,dx),(dx)")
