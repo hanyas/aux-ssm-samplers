@@ -5,7 +5,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from chex import ArrayTree, Array
-from jax.scipy.linalg import cho_solve
+from jax.scipy.linalg import cho_solve, block_diag
 
 
 def extended(mean: Callable, cov: Callable, params: Optional[ArrayTree], x_star: Array, _P_star: Optional[Array]):
@@ -111,6 +111,25 @@ def gauss_hermite(mean: Callable, cov: Callable, params: Optional[ArrayTree], x_
     return _generic_sigma_points(mean, cov, params, x_star, P_star, lambda dim: _gauss_hermite_points(dim, order))
 
 
+def gauss_hermite_non_additive(fn: Callable, params: Optional[ArrayTree], x_star, P_star, noise_dim=None, order=3):
+    """
+    Augmented form.
+    The random variables are assumed to be
+    distributed according to a standard normal.
+    """
+    if noise_dim is None:
+        noise_dim = x_star.shape[0]
+
+    aug_x_star = jnp.concatenate([x_star, jnp.zeros(noise_dim)], axis=0)
+    aug_P_star = block_diag(P_star, jnp.eye(noise_dim))
+
+    def aug_fn(aug_x, params):
+        x, q = aug_x[:len(x_star)], aug_x[len(x_star):]
+        return fn(x, q, params)
+
+    return _generic_sigma_points_non_additive(aug_fn, params, aug_x_star, aug_P_star, lambda dim: _gauss_hermite_points(dim, order), noise_dim)
+
+
 def cubature(mean: Callable, cov: Callable, params: Optional[ArrayTree], x_star: Array, P_star: Array):
     """
     Cubature method for linearisation.
@@ -161,6 +180,35 @@ def _generic_sigma_points(mean, cov, params, x_star, P_star, get_sigma_points):
     L = Phi - temp @ temp.T + v_f
 
     return F_x, L, m_f - F_x @ x_star
+
+
+def _generic_sigma_points_non_additive(
+        fn, params, x_star, P_star, get_sigma_points, noise_dim
+):
+    """
+    Statistical linear regression for model with non-additive Gaussian noise.
+    Notations correspond to those in Simo's book.
+    """
+    chol = jnp.linalg.cholesky(P_star)
+    dim = x_star.shape[0]
+    w, xi = get_sigma_points(dim)
+    points = x_star[None, :] + jnp.dot(chol, xi).T
+
+    f_pts = jax.vmap(fn, in_axes=[0, None])(points, params)
+    m_f = jnp.dot(w, f_pts)
+
+    # Equation 9.50 in Särkkä (2023).
+    C_R = _cov(w, points[:, :-noise_dim], x_star[:-noise_dim], f_pts, m_f)
+    P = P_star[:-noise_dim, :-noise_dim]
+    chol_P = jnp.linalg.cholesky(P)
+    A = cho_solve((chol_P, True), C_R).T
+
+    S_R = _cov(w, f_pts, m_f, f_pts, m_f)
+
+    temp = A @ chol_P
+    L = S_R - temp @ temp.T
+
+    return A, L, m_f - A @ x_star[:-noise_dim]
 
 
 def _cov(wc, x_pts, x_mean, y_points, y_mean):

@@ -1,9 +1,10 @@
 import jax
 import numpy as np
+import jax.numpy as jnp
 import numpy.testing as npt
 import pytest
 
-from .linearisation import extended, gauss_hermite, cubature
+from .linearisation import extended, gauss_hermite, cubature, gauss_hermite_non_additive
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -44,3 +45,12 @@ def test_linear():
     np.testing.assert_allclose(F_e, A)
     np.testing.assert_allclose(Q_e, Q)
     np.testing.assert_allclose(b_e, b)
+
+    # Tests for the non-additive gauss hermite.
+    def aug_mean(x, q, _):
+        return A @ x + b + jnp.linalg.cholesky(Q) @ q
+
+    F_nagh, Q_nagh, b_nagh = gauss_hermite_non_additive(aug_mean, None, x_star, P_star, 2)
+    np.testing.assert_allclose(F_nagh, F_gh)
+    np.testing.assert_allclose(b_nagh, b_gh)
+    np.testing.assert_allclose(Q_nagh, Q_gh)
